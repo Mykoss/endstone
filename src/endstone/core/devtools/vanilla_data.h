@@ -48,6 +48,7 @@ struct VanillaData {
     } recipes;
 
     static VanillaData *get();
+    static VanillaData *collect();
 };
 
 }  // namespace endstone::core::devtools

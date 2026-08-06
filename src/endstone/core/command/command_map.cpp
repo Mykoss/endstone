@@ -32,6 +32,7 @@
 #include "endstone/core/command/defaults/ban_command.h"
 #include "endstone/core/command/defaults/ban_ip_command.h"
 #include "endstone/core/command/defaults/ban_list_command.h"
+#include "endstone/core/command/defaults/export_vanilla_command.h"
 #include "endstone/core/command/defaults/pardon_command.h"
 #include "endstone/core/command/defaults/pardon_ip_command.h"
 #include "endstone/core/command/defaults/plugins_command.h"
@@ -148,6 +149,7 @@ void EndstoneCommandMap::setDefaultCommands()
     registerCommand(std::make_unique<BanCommand>());
     registerCommand(std::make_unique<BanIpCommand>());
     registerCommand(std::make_unique<BanListCommand>());
+    registerCommand(std::make_unique<ExportVanillaCommand>());
     registerCommand(std::make_unique<PardonCommand>());
     registerCommand(std::make_unique<PardonIpCommand>());
     registerCommand(std::make_unique<PluginsCommand>());

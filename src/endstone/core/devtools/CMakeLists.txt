@@ -11,7 +11,6 @@ add_library(endstone_devtools
         imgui_json.cpp
         devtools.cpp
         devtools_command.cpp
-        vanilla_data.cpp
 )
 add_library(endstone::devtools ALIAS endstone_devtools)
 target_link_libraries(endstone_devtools PUBLIC endstone::core glfw imgui::imgui zstr::zstr)

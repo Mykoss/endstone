@@ -34,6 +34,7 @@
 #include "endstone/core/devtools/imgui_impl_opengl3.h"
 #include "endstone/core/devtools/imgui_json.h"
 #include "endstone/core/devtools/vanilla_data.h"
+#include "endstone/core/devtools/vanilla_exporter.h"
 #include "endstone/core/logger_factory.h"
 #include "endstone/detail.h"
 #include "endstone/runtime/runtime.h"
@@ -153,7 +154,6 @@ void showItemWindow(bool *open);
 void showRecipeWindow(bool *open);
 void showBiomeWindow(bool *open);
 void openFileBrowser(std::string title, const std::string &input_name);
-void exportAll(const std::filesystem::path &base_path, const VanillaData *dat);
 
 void render()
 {
@@ -266,8 +266,8 @@ void render()
             if (ImGui::BeginMenu("File")) {
                 auto *data = VanillaData::get();
                 ImGui::SeparatorText("Export");
-                if (ImGui::MenuItem("Export All")) {
-                    exportAll(data_dir, data);
+                if (ImGui::MenuItem("Export All", nullptr, false, data != nullptr)) {
+                    exportAll(data_dir, *data);
                 }
                 if (ImGui::BeginMenu("JSON files", data != nullptr)) {
                     if (ImGui::MenuItem("Block Types")) {
@@ -618,55 +618,6 @@ void openFileBrowser(std::string title, const std::string &input_name)
     gFileBrowser->SetTitle(std::move(title));
     gFileBrowser->SetTypeFilters({fs::path(input_name).extension().string()});
     gFileBrowser->SetInputName(input_name);
-}
-
-void exportAll(const std::filesystem::path &base_path, const VanillaData *data)
-{
-    static auto save_json_to_file = [&](const nlohmann::json &arg, const std::string &name) {
-        std::ofstream file(base_path / name);
-        file << arg;
-    };
-    static auto save_nbt_to_file = [&](const CompoundTag &arg, const std::string &name) {
-        std::string buffer;
-        BigEndianStringByteOutput output(buffer);
-        NbtIo::writeNamedTag("", arg, output);
-        zstr::ofstream file((base_path / name).string(), std::ios::out | std::ios::binary);
-        file << buffer;
-    };
-    save_json_to_file(data->block_types, "block_types.json");
-    save_json_to_file(data->block_states, "block_states.json");
-    save_json_to_file(data->block_tags, "block_tags.json");
-    save_json_to_file(data->items, "items.json");
-    save_json_to_file(data->item_tags, "item_tags.json");
-    save_json_to_file(data->creative_groups, "creative_groups.json");
-    save_json_to_file(data->biomes, "biomes.json");
-
-    save_nbt_to_file(data->item_components, "item_components.nbt");
-
-    auto block_palette = CompoundTag();
-    block_palette.put("blocks", data->block_palette.copy());
-    save_nbt_to_file(block_palette, "block_palette.nbt");
-
-    auto creative_items = CompoundTag();
-    creative_items.put("items", data->creative_items.copy());
-    save_nbt_to_file(creative_items, "creative_items.nbt");
-
-    auto recipe_json = nlohmann::json{
-        {"shapeless", data->recipes.shapeless},
-        {"shaped", data->recipes.shaped},
-        {"furnace", data->recipes.furnace},
-        {"furnaceAux", data->recipes.furnace_aux},
-        {"multi", data->recipes.multi},
-        {"userDataShapeless", data->recipes.user_data_shapeless},
-        {"shapelessChemistry", data->recipes.shapeless_chemistry},
-        {"shapedChemistry", data->recipes.shaped_chemistry},
-        {"smithingTransform", data->recipes.smithing_transform},
-        {"smithingTrim", data->recipes.smithing_trim},
-        {"potionMixes", data->recipes.potion_mixes},
-        {"containerMixes", data->recipes.container_mixes},
-        {"materialReducer", data->recipes.material_reducer},
-    };
-    save_json_to_file(recipe_json, "recipes.json");
 }
 
 }  // namespace endstone::core::devtools

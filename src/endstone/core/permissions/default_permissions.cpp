@@ -98,6 +98,9 @@ Permission &CommandPermissions::registerPermissions(Permission &parent)
                        commands);
     registerPermission(PREFIX + "banlist", "banlist", "Allows the user to list all the banned ips or players.",
                        PermissionDefault::Operator, commands);
+    registerPermission(PREFIX + "exportvanilla", "exportvanilla",
+                       "Allows the console to export vanilla BDS data without graphical DevTools.",
+                       PermissionDefault::Console, commands);
 
     registerPermission(PREFIX + "unban", "pardon", "Allows the user to unban players.", PermissionDefault::Operator,
                        commands);

@@ -14,6 +14,8 @@
 
 #include "endstone/core/devtools/vanilla_data.h"
 
+#include <atomic>
+#include <exception>
 #include <unordered_map>
 
 #include <entt/locator/locator.hpp>
@@ -26,9 +28,9 @@
 #include "bedrock/world/level/block/actor/furnace_block_actor.h"
 #include "bedrock/world/level/dimension/vanilla_dimensions.h"
 #include "endstone/core/base64.h"
-#include "endstone/core/devtools/imgui_json.h"
 #include "endstone/core/json.h"
 #include "endstone/core/level/level.h"
+#include "endstone/core/scheduler/scheduler.h"
 #include "endstone/core/server.h"
 #include "endstone/core/util/uuid.h"
 
@@ -50,6 +52,9 @@ inline void to_json(nlohmann::json &json, const AABB &aabb)
 
 namespace endstone::core::devtools {
 namespace {
+std::atomic_bool gCollectionScheduled = false;
+std::atomic_bool gCollecting = false;
+
 void dumpBlockData(VanillaData &data, const ::Level &level)
 {
     auto overworld = level.getDimension(VanillaDimensions::Overworld);
@@ -378,34 +383,70 @@ void dumpBiomes(VanillaData &data, ::Level &level)
 
 VanillaData *VanillaData::get()
 {
-    static std::atomic ready = false;
-    static std::atomic should_run = true;
-
-    if (ready) {
+    if (entt::locator<VanillaData>::has_value()) {
         return &entt::locator<VanillaData>::value();
     }
 
-    if (entt::locator<EndstoneServer>::has_value()) {
-        auto &server = EndstoneServer::getInstance();
-        if (auto *server_level = server.getLevel(); server_level) {
-            auto &level = static_cast<EndstoneLevel *>(server_level)->getHandle();
-            auto &scheduler = static_cast<EndstoneScheduler &>(server.getScheduler());
-            if (should_run) {
-                scheduler.runTask([&]() {
-                    // run on the server thread instead of UI thread
-                    VanillaData data;
-                    dumpBlockData(data, level);
-                    dumpItemData(data, level);
-                    dumpRecipes(data, level);
-                    dumpBiomes(data, level);
-                    entt::locator<VanillaData>::emplace(std::move(data));
-                    ready = true;
-                });
-                should_run = false;
-            }
-        }
+    if (!entt::locator<EndstoneServer>::has_value()) {
+        return nullptr;
     }
+
+    auto &server = EndstoneServer::getInstance();
+    if (!server.getLevel()) {
+        return nullptr;
+    }
+
+    if (!gCollectionScheduled.exchange(true)) {
+        auto &scheduler = static_cast<EndstoneScheduler &>(server.getScheduler());
+        scheduler.runTask([]() {
+            try {
+                VanillaData::collect();
+            }
+            catch (const std::exception &error) {
+                EndstoneServer::getInstance().getLogger().error("Unable to collect vanilla data: {}", error.what());
+            }
+            gCollectionScheduled = false;
+        });
+    }
+
     return nullptr;
+}
+
+VanillaData *VanillaData::collect()
+{
+    if (entt::locator<VanillaData>::has_value()) {
+        return &entt::locator<VanillaData>::value();
+    }
+
+    if (!entt::locator<EndstoneServer>::has_value()) {
+        return nullptr;
+    }
+
+    auto &server = EndstoneServer::getInstance();
+    auto *server_level = server.getLevel();
+    if (!server_level) {
+        return nullptr;
+    }
+
+    if (gCollecting.exchange(true)) {
+        return nullptr;
+    }
+
+    try {
+        auto &level = static_cast<EndstoneLevel *>(server_level)->getHandle();
+        VanillaData data;
+        dumpBlockData(data, level);
+        dumpItemData(data, level);
+        dumpRecipes(data, level);
+        dumpBiomes(data, level);
+        entt::locator<VanillaData>::emplace(std::move(data));
+        gCollecting = false;
+        return &entt::locator<VanillaData>::value();
+    }
+    catch (...) {
+        gCollecting = false;
+        throw;
+    }
 }
 
 }  // namespace endstone::core::devtools
