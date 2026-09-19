@@ -24,6 +24,7 @@
 
 #include "bedrock/entity/components/user_entity_identifier_component.h"
 #include "bedrock/network/packet.h"
+#include "bedrock/network/packet/boss_event_packet.h"
 #include "bedrock/network/packet/clientbound_map_item_data_packet.h"
 #include "bedrock/network/packet/correct_player_move_prediction_packet.h"
 #include "bedrock/network/packet/emote_packet.h"
@@ -47,6 +48,7 @@
 #include "endstone/block/block.h"
 #include "endstone/color_format.h"
 #include "endstone/core/base64.h"
+#include "endstone/core/boss/boss_bar.h"
 #include "endstone/core/entity/components/flag_components.h"
 #include "endstone/core/form/form_codec.h"
 #include "endstone/core/game_mode.h"
@@ -80,6 +82,7 @@ EndstonePlayer::EndstonePlayer(EndstoneServer &server, ::Player &player)
     const auto component = player.getPersistentComponent<UserEntityIdentifierComponent>();
     uuid_ = EndstoneUUID::fromMinecraft(component->getClientUUID());
     xuid_ = component->getXuid(false);
+    address_ = EndstoneSocketAddress::fromNetworkIdentifier(component->getNetworkId());
     last_op_status_ = EndstonePlayer::isOp();
 }
 
@@ -237,8 +240,7 @@ std::string EndstonePlayer::getXuid() const
 
 SocketAddress EndstonePlayer::getAddress() const
 {
-    auto component = getHandle().getPersistentComponent<UserEntityIdentifierComponent>();
-    return EndstoneSocketAddress::fromNetworkIdentifier(component->getNetworkId());
+    return address_;
 }
 
 void EndstonePlayer::transfer(std::string host, int port) const
@@ -516,9 +518,15 @@ void EndstonePlayer::spawnParticle(std::string name, float x, float y, float z,
 
 std::chrono::milliseconds EndstonePlayer::getPing() const
 {
-    auto *peer = server_.getRakNetConnector().getPeer();
     const auto *component = getHandle().tryGetComponent<UserEntityIdentifierComponent>();
-    return std::chrono::milliseconds(peer->GetAveragePing(component->getNetworkId().guid));
+    if (!component) {
+        return {};
+    }
+    const auto *peer = server_.getServer().getNetwork().getPeerForUser(component->getNetworkId());
+    if (!peer) {
+        return {};
+    }
+    return peer->getNetworkStatus().current_ping;
 }
 
 std::string EndstonePlayer::getLocale() const
@@ -637,22 +645,22 @@ void EndstonePlayer::sendPacket(int packet_id, std::string_view payload) const
 
 void EndstonePlayer::sendMap(MapView &map)
 {
-    auto &view = static_cast<EndstoneMapView &>(map);
+    auto &handle = static_cast<EndstoneMapView &>(map).getHandle();
     auto packet = MinecraftPackets::createPacket(MinecraftPacketIds::MapData);
     auto &pk = static_cast<ClientboundMapItemDataPacket &>(*packet);
-    pk.payload.map_id = view.map_.getMapId();
-    pk.payload.scale = view.map_.getScale();
+    pk.payload.map_id = handle.getMapId();
+    pk.payload.scale = handle.getScale();
     pk.payload.start_x = 0;
     pk.payload.start_y = 0;
-    pk.payload.map_origin = view.map_.getOrigin();
-    pk.payload.dimension = view.map_.getDimensionId().value;
+    pk.payload.map_origin = handle.getOrigin();
+    pk.payload.dimension = handle.getDimensionId().value;
     pk.payload.width = MapConstants::MAP_SIZE;
     pk.payload.height = MapConstants::MAP_SIZE;
     pk.payload.type =
         ClientboundMapItemDataPacket::Type::TextureUpdate | ClientboundMapItemDataPacket::Type::DecorationUpdate;
-    pk.payload.locked = view.map_.isLocked();
+    pk.payload.locked = handle.isLocked();
 
-    for (const auto &[unique_id, decoration] : view.map_.getDecorations()) {
+    for (const auto &[unique_id, decoration] : handle.getDecorations()) {
         pk.payload.unique_ids.emplace_back(unique_id);
         pk.payload.decorations.emplace_back(decoration);
     }
@@ -698,20 +706,20 @@ bool EndstonePlayer::handlePacket(Packet &packet)
     case MinecraftPacketIds::PlayerSkin: {
         auto &server = static_cast<EndstoneServer &>(getServer());
         auto &pk = static_cast<PlayerSkinPacket &>(packet);
-        if (getHandle().getPersistentComponent<UserEntityIdentifierComponent>()->getClientUUID() == pk.uuid) {
-            Message skin_change_message =
-                Translatable(ColorFormat::Yellow + (pk.skin.getIsPersona() ? "%multiplayer.player.changeToPersona"
-                                                                           : "%multiplayer.player.changeToSkin"),
-                             {getName()});
-            PlayerSkinChangeEvent e{*this, EndstoneSkin::fromMinecraft(pk.skin), skin_change_message};
+        if (getHandle().getPersistentComponent<UserEntityIdentifierComponent>()->getClientUUID() == pk.payload.uuid) {
+            Message skin_change_message = Translatable(
+                ColorFormat::Yellow + (pk.payload.skin.getIsPersona() ? "%multiplayer.player.changeToPersona"
+                                                                      : "%multiplayer.player.changeToSkin"),
+                {getName()});
+            PlayerSkinChangeEvent e{*this, EndstoneSkin::fromMinecraft(pk.payload.skin), skin_change_message};
             getServer().getPluginManager().callEvent(e);
             if (e.isCancelled()) {
                 auto new_packet = MinecraftPackets::createPacket(MinecraftPacketIds::PlayerSkin);
                 auto &new_pk = static_cast<PlayerSkinPacket &>(*new_packet);
-                new_pk.uuid = pk.uuid;
-                new_pk.skin = getHandle().getSkin();
-                new_pk.localized_new_skin_name = pk.localized_old_skin_name;
-                new_pk.localized_old_skin_name = pk.localized_new_skin_name;
+                new_pk.payload.uuid = pk.payload.uuid;
+                new_pk.payload.skin = getHandle().getSkin();
+                new_pk.payload.localized_new_skin_name = pk.payload.localized_old_skin_name;
+                new_pk.payload.localized_old_skin_name = pk.payload.localized_new_skin_name;
                 getHandle().sendNetworkPacket(new_pk);
                 return false;
             }
@@ -727,6 +735,14 @@ bool EndstonePlayer::handlePacket(Packet &packet)
     }
     case MinecraftPacketIds::SetLocalPlayerAsInit: {
         doFirstSpawn();
+        return true;
+    }
+    case MinecraftPacketIds::BossEvent: {
+        const auto &pk = static_cast<BossEventPacket &>(packet);
+        if (pk.payload.event_type == BossEventUpdateType::Query &&
+            pk.payload.boss_id == getHandle().getOrCreateUniqueID()) {
+            EndstoneBossBar::resend(*this);
+        }
         return true;
     }
     case MinecraftPacketIds::Emote: {
@@ -749,6 +765,21 @@ bool EndstonePlayer::handlePacket(Packet &packet)
     }
     case MinecraftPacketIds::PlayerAuthInputPacket: {
         auto &pk = static_cast<PlayerAuthInputPacket &>(packet);
+        if (pk.getInput(PlayerAuthInputPacket::InputData::MissedSwing)) {
+            PlayerInteractEvent e{
+                *this,
+                PlayerInteractEvent::Action::LeftClickAir,
+                getInventory().getItemInMainHand(),
+                nullptr,
+                BlockFace::South,
+                std::nullopt,
+            };
+            getServer().getPluginManager().callEvent(e);
+            if (e.isCancelled()) {
+                pk.setInput(PlayerAuthInputPacket::InputData::MissedSwing, false);
+            }
+        }
+
         auto &actions = pk.payload.player_block_actions.actions_;
         for (auto it = actions.begin(); it != actions.end();) {
             const auto &action = *it;
@@ -1002,7 +1033,7 @@ void EndstonePlayer::updateAbilities() const
 {
     auto packet = MinecraftPackets::createPacket(MinecraftPacketIds::UpdateAbilitiesPacket);
     std::shared_ptr<UpdateAbilitiesPacket> pk = std::static_pointer_cast<UpdateAbilitiesPacket>(packet);
-    pk->data = {getHandle().getOrCreateUniqueID(), getHandle().getAbilities()};
+    pk->payload.data = {getHandle().getOrCreateUniqueID(), getHandle().getAbilities()};
     getHandle().sendNetworkPacket(*packet);
 }
 

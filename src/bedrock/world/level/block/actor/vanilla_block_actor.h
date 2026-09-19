@@ -27,8 +27,7 @@ class Vec3;
 
 class IVanillaMainBlockActorComponent {
 public:
-    // TODO(fixme): check the name
-    virtual void unknown0() = 0;  // added in 1.26.40, returns the BlockActor sub-object
+    virtual BlockActor &getBlockActor() = 0;
     [[nodiscard]] virtual BlockActorType getBlockActorType() const = 0;
     virtual Container *getContainer() = 0;
     [[nodiscard]] virtual const Container *getContainer() const = 0;
@@ -100,11 +99,11 @@ public:
     [[nodiscard]] bool isChanged() const override { return properties_.contains(BlockActor::Property::Changed); }
 
 protected:
-    int tick_count_;                                    // +64
-    BlockActor::Properties properties_;                 // +68
-    AABB bb_;                                           // +72
-    BlockActorRendererId renderer_id_;                  // +96
-    ActorTerrainInterlockData terrain_interlock_data_;  // +104
-    Bedrock::Safety::RedactableString custom_name_;     // +128
-    std::string filtered_custom_name_;                  // +200
+    int tick_count_;                                    // +72
+    BlockActor::Properties properties_;                 // +76
+    AABB bb_;                                           // +80
+    BlockActorRendererId renderer_id_;                  // +104
+    ActorTerrainInterlockData terrain_interlock_data_;  // +112
+    Bedrock::Safety::RedactableString custom_name_;     // +136
+    std::string filtered_custom_name_;                  // +192
 };

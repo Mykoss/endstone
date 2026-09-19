@@ -11,7 +11,7 @@
 </p>
 
 [![Build](https://github.com/EndstoneMC/endstone/actions/workflows/build.yml/badge.svg)](https://github.com/EndstoneMC/endstone/actions/workflows/build.yml)
-[![Minecraft](https://img.shields.io/badge/minecraft-v26.40_(Bedrock)-black)](https://feedback.minecraft.net/hc/en-us/sections/360001186971-Release-Changelogs)
+[![Minecraft](https://img.shields.io/badge/minecraft-v26.51_(Bedrock)-black)](https://feedback.minecraft.net/hc/en-us/sections/360001186971-Release-Changelogs)
 [![PyPI - Version](https://img.shields.io/pypi/v/endstone)](https://pypi.org/project/endstone)
 [![Python](https://img.shields.io/pypi/pyversions/endstone?logo=python&logoColor=white)](https://www.python.org/)
 [![GitHub License](https://img.shields.io/github/license/endstonemc/endstone)](LICENSE)
@@ -117,7 +117,7 @@ We welcome contributions from the community! Whether it's bug reports, feature r
 
 - **Found a bug?** Open an [issue](https://github.com/EndstoneMC/endstone/issues)
 - **Want to contribute code?** Submit a [pull request](https://github.com/EndstoneMC/endstone/pulls)
-- **Want to support the project?** [Buy me a coffee](https://ko-fi.com/EndstoneMC)
+- **Want to support the project?** [Become a sponsor](https://github.com/sponsors/EndstoneMC)
 
 ## License
 

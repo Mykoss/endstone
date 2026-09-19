@@ -62,7 +62,7 @@ bool Actor::isType(ActorType type) const
 
 bool Actor::hasType(ActorType types) const
 {
-    if (static_cast<std::underlying_type_t<ActorType>>(types)) {
+    if (static_cast<std::underlying_type_t<ActorType>>(types & ActorType::TypeMask)) {
         return types == getEntityTypeId();
     }
     return (types & getEntityTypeId()) == types;
@@ -337,7 +337,7 @@ std::vector<std::string> Actor::getTags() const
     if (!component) {
         return {};
     }
-    return getLevel().getTagRegistry().getTagsInSet(component->tag_set_id);
+    return const_cast<Level &>(getLevel()).getTagRegistry().getTagsInSet(component->tag_set_id);
 }
 
 bool Actor::addTag(const std::string &tag)

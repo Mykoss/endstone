@@ -51,6 +51,50 @@ diffs as private working references only.
 
 ---
 
+# Orchestration - never wait idle
+
+Building the two IDA databases is the long pole (hours each, multi-GB). Almost
+nothing else in a bump needs one, so the database must never be the thing you are
+waiting on.
+
+- **DO launch both databases first**, via `build-ida-db` - the opening action of a
+  Scenario-B bump, not a step you reach later.
+- **DO run the entire non-IDA half while they analyse.** `lief` + `capstone` on the
+  shipped binaries settle, with no database: the protocol version; the per-class
+  vtable diff (Linux RTTI); `sizeof` for every asserted class; whether a resolved
+  offset is a real function start (`.pdata` / `.eh_frame_hdr` FDE); referenced
+  string-set identity; and cutting, replaying and uniqueness-checking byte patterns.
+- **DO order it: dumper triage -> non-IDA sweeps -> IDA.** Triage names the broken
+  entries, the sweeps clear or convict most of them, and only the string-less
+  locates genuinely need a database.
+- **DO switch to the database the moment it is ready - it outranks your own
+  scanners.** The `lief`/`capstone` path is a stopgap for the hours the analysis
+  is running, not a preferred technique. Once a platform's `.i64` exists, take
+  xrefs, function boundaries, call graphs and identity from IDA; fall back to a
+  hand-rolled scan only for the platform whose database is still building, or for
+  a whole-binary sweep IDA has no cheap equivalent of (the per-class RTTI vtable
+  diff, the section-wide invariant counts).
+- **DO NOT trust a hand-rolled scanner's negative result.** It under-reports
+  silently and in ways that read like a real finding: a `lea`-only scan misses
+  the `movups xmm0,[rip+x]` form that materializes short string literals, and
+  folding the ModRM byte into the disp32 capture matches nothing at all. A string
+  that plainly exists but scans as unreferenced is a bug in the scanner until IDA
+  says otherwise - ask the database before concluding a locate recipe went stale.
+- **DO validate any scanner of your own against the PREVIOUS binary before trusting
+  it** - every committed pattern must resolve to its known-good offset there. Until
+  it reproduces the dumper exactly, its verdicts on the new binary mean nothing.
+- **DO anchor an identity claim on a self-naming marker string** (a trace/profiler
+  literal like `<Class>::<method>`) referenced from exactly one site in both
+  versions. A windowed string-set comparison overruns into neighbouring functions
+  and will convict a correct offset.
+- **DO fan the per-symbol locates out to parallel agents** once the databases are
+  up - they are independent. There is ONE idalib worker, so agents driving idalib
+  serialise: fan out the reading and decision work, not the idalib calls.
+- **DO NOT block on the databases to start the port.** The vtable and member-layout
+  work is the larger half of a bump and is entirely RTTI-driven on Linux.
+
+---
+
 # The symbol pipeline (shared)
 
 ## How it works
@@ -154,6 +198,16 @@ iteratively; never batch many unverified ABI edits.**
   used across many headers goes in `src/bedrock/forward.h` (alphabetical); for a
   heavy include chain, forward-declare and use the type incomplete (fine for
   pointers, references, and container value types).
+- **Every header must be self-contained.** A sweep that adds one `#include` to
+  an events/shard header can re-order the whole chain and expose headers that
+  were silently borrowing a transitive include - the symptom is `no template
+  named 'X'` plus a cascade of `static_assert` size failures in a file the sweep
+  never touched. Include what you use, in the file that uses it. Verify with a
+  one-line TU (`#include "<the header>"`) compiled `/Zs` (`-fsyntax-only`) using
+  flags lifted from the **build log**, not from the repo-root
+  `compile_commands.json`, which goes stale and can miss defines (`-DNOMINMAX`,
+  `-DWIN32_LEAN_AND_MEAN`). Sweep the whole sibling directory at once - latent
+  cases cluster.
 - **Structural refactors** - when BDS introduces a base class, mirror it (add
   the base header, re-parent, move shared members down). When BDS removes a
   class, `git rm` once `grep` confirms nothing references it. Follow BDS
@@ -287,6 +341,23 @@ between each - see *Editing src/bedrock correctly*):
 
 ## Finding a new symbol / offset without a header diff
 
+- **A string anchor is not referenced only by `lea` - short literals arrive via
+  SSE.** A literal that fits a `std::string`'s SSO buffer is materialized with
+  `movups xmm0, [rip+disp32]` (`0F 10 05 ...`, no REX, two-byte opcode) and
+  stored with `movups [reg], xmm0` (`0F 11 ...`); longer ones come in 16-byte
+  `movups` chunks. A hand-rolled scanner that only matches `lea reg,[rip+x]`
+  (`48/4C 8D <modrm> disp32`) reports such a string as having **zero**
+  references, which reads exactly like "the string is dead" or "the recipe is
+  stale" and sends you re-anchoring a recipe that was fine. Match the `0F 10 05`
+  / `0F 11` forms too, and when a string that plainly exists scans as
+  unreferenced, ask the database for its xrefs before rewriting the recipe.
+  (1.26.51: `%multiplayer.player.left`, `Resource Repository Async Group` and
+  `Failed to resolve block "` all scanned as unreferenced for exactly this.)
+- **Also mind the ModRM byte when hand-writing a rip-relative scanner.** The
+  displacement starts *after* modrm, so the regex is
+  `[REX] <opcode> [
+%-5=] (disp32)`; folding
+  modrm into the disp32 capture silently matches nothing.
 - **Navigate by string anchor, not symbol.** To locate an unnamed function:
   take a string literal it references (an error/i18n key like
   `commands.setmaxplayers.success.lowerbound`), `find_bytes` the *ASCII hex* of
@@ -366,6 +437,49 @@ not the virtuals), so you diff layout without any virtual-function names.
    concrete class (e.g. `ServerPlayer` covers `Actor -> Mob -> Player ->
    ServerPlayer`) gives the whole chain in one read. Equal length on every level
    = no net change (still verify order).
+2b. **Never end a vtable run at "the next qword is not code" - on Linux either.**
+   The Windows warning about packed vftables applies verbatim to `.data.rel.ro`:
+   when the object following a vtable is an RTTI-less function-pointer table (an
+   entt-meta / cereal type-erased manager, a dtor/copy/move/compare/hash block),
+   the run-length walk sails straight through it and reports a class as
+   dozens of slots longer than it is. The terminator is the next vtable's own
+   header - a zero `offset_to_top` slot followed by a typeinfo pointer - not the
+   first non-code qword. **Cross-check every suspicious length against the
+   DERIVED classes: a derived vtable can never be shorter than its primary
+   base's**, so if every deriver measures 29 in both versions, the base's "55"
+   is the artifact, not a removal. 1.26.51 produced two such false positives
+   this way, `BaseCircuitComponent` reading 55 -> 29 and `RemoteConnector`
+   -56 reading 22 -> 20; both classes were completely unchanged.
+2b-net. **A length sweep cannot see a NET-ZERO change, and BDS makes them.**
+   1.26.51 removed one virtual from `Actor` (`canFreeze`) and added one to
+   `Player`, so `Actor` read 138 -> 137 and `Mob` 176 -> 175, while `Player` and
+   `ServerPlayer` read **246 and 248 in both versions** and never entered the
+   changed list. Every Player-level virtual after the insertion point was one
+   slot off; `sendNetworkPacket` landed on `sendComplexInventoryTransaction` and
+   faulted deep inside BDS the moment a player joined.
+   - **Whenever a base's length changes, re-check every deriver by ALIGNMENT,
+     not by length.** A deriver whose length is unchanged has, by definition,
+     gained exactly as many virtuals as its base lost.
+   - Better: run the per-slot `difflib.SequenceMatcher` alignment (step 4) over
+     *every* class Endstone declares and report only `insert`/`delete` opcodes.
+     It is the same walk the length sweep already does plus a 9-instruction
+     signature per slot, and it is the only sweep that catches this.
+
+2c. **The class-level length sweep has two blind spots - close both.** The
+   usual sweep (every `_ZTS` name -> vtable length in each binary, intersected
+   with the class names Endstone declares) silently skips:
+   - **Abstract bases whose vtable is never emitted.** Their `__class_type_info`
+     is only referenced from derived `__si_class_type_info` records, so the
+     offset-0 address-point search finds nothing and the class never enters the
+     table. `ItemDescriptor::BaseDescriptor` gained a virtual in 1.26.51 and did
+     not appear in the sweep at all; only its five derivers did, each 18 -> 19.
+     So **read the sweep as "some class in this hierarchy changed"** and walk up
+     to the base Endstone actually declares.
+   - **Classes Endstone declares in a `.cpp`, not a header.** Scan `**/*.cpp`
+     alongside `**/*.h` when building the "what Endstone declares" set -
+     `InternalItemDescriptor` lives in `item_descriptor.cpp` and was invisible
+     to a header-only scan.
+
 3. **Structural fingerprint** confirms no same-count shuffle, name-free: tag each
    slot `P` = `__cxa_pure_virtual`, `T` = this-adjusting thunk (`48 83 ef` /
    `48 81 ef` = `sub rdi`), `R` = repeats previous target (shared-stub runs),
@@ -561,6 +675,29 @@ control block and fault on garbage. When that happens:
   first 8 bytes, so a getter returning `.get()` keeps working while every member
   *after* it is 8 bytes out. Silent, and it hides the real breakage.
 
+### When the crash leaves NO report: 0xC0000409 is a vtable slot shift
+
+Exit code `3221226505` / `0xC0000409` is `__fastfail`, and subcode `0xA` is
+`FAST_FAIL_GUARD_ICALL_CHECK_FAILURE` - Control Flow Guard refusing an indirect
+call whose target is not a registered function entry. That is the signature of a
+**virtual call landing on the wrong slot**: the loaded qword is a valid-looking
+address (a data table, a vtable's tail, the middle of a function) but not a CFG
+call target. An access violation would at least give you a trace; a fast-fail
+bypasses SEH, so crashpad writes nothing and `crash_reports/` stays empty.
+
+Do not reach for a debugger - **bisect with `fprintf(stderr, ...)` + `fflush`**.
+Two builds is usually enough: one marker per top-level stage to find the
+function, then one marker per statement inside it. 1.26.51's went
+`recipes -> shapeless[0] -> ing serialize` and stopped, naming
+`ItemDescriptor::serialize(Json::Value&)`'s `impl_->serialize(json)` as the bad
+dispatch in two rebuilds. Then take the concrete class the call dispatches on
+(here `InternalItemDescriptor`) straight to the Linux RTTI vtable diff.
+
+Related trap: Endstone's devtools thread dumps every block, item, recipe and
+biome at startup, so it exercises far more of the ABI than a bare boot does.
+A bump that "boots fine" with devtools off is not a bump that works - leave
+devtools on and treat its dump as the acceptance test.
+
 ### The change BDS actually makes most often
 
 **A member changing KIND at an unchanged offset**, growing 8 -> 16 and shifting
@@ -577,6 +714,36 @@ running a deleter and starts testing an engaged flag over the value's own body),
 and a member relocated within the struct with `sizeof` unchanged - which no size
 check can ever detect.
 
+### A class can keep its name and API but move its BODY behind a pointer
+
+`sizeof` sweeps, vtable sweeps and RTTI all say "unchanged" when BDS turns a
+class into a handle - the old body becomes a separate allocation and the class
+shrinks to a single pointer. `ResourcePack` did this in 1.26.51: it stayed
+non-polymorphic, stayed named the same, and every accessor Endstone calls kept
+its signature, but `sizeof` went from a few hundred bytes to 8.
+
+**The tell is one extra `mov rax, [rax]` in a BDS function that reads through
+the object**, so diff the *chain of indirections*, not the endpoints:
+
+    1.26.45   mov r8, [rbx+0x10]   ; ResourcePack*
+              mov rax, [r8+8]      ; -> Pack*
+              mov rax, [rax]       ; -> PackManifest*
+    1.26.51   mov r8, [rbx+0x10]   ; ResourcePack*
+              mov rax, [r8]        ; -> body        <-- new hop
+              mov rax, [rax+8]     ; -> Pack*
+              mov rax, [rax]       ; -> PackManifest*
+
+Pick any BDS function that walks the class (a getter, a filter loop, a
+comparison) and read the two side by side. Confirm at runtime by dumping the
+first qwords of a live object: the handle's own tail is unrelated heap (an NT
+heap block header at `+8` says the allocation really is 8 bytes), while the
+pointer at `+0` leads to something with the *old* layout - zeroed leading bools,
+the same `shared_ptr` at `+8`, the same null `unique_ptr` at `+24`.
+
+Port it by nesting the old member list in a `Body`/`Impl` struct and leaving one
+pointer in the class; nothing else in Endstone has to change, because the
+accessors keep their signatures.
+
 ### Proof techniques that settle it quickly
 
 - **A single instruction changing WIDTH at an unchanged offset proves an
@@ -587,6 +754,17 @@ check can ever detect.
   divergence to the end moved by exactly the same delta, there is exactly ONE
   change and nothing before it moved. A mixed band (some +8, some 0, some +16)
   means multiple changes - keep going.
+- **Index-align the two dtors' displacement LISTS, don't set-difference them.**
+  Collect the distinct `this`-relative displacements each version's D1 touches,
+  sort both, and pair them up by index. When the two lists are the same length
+  the pairing is exact and every shift boundary falls out in one read - a run of
+  `d -> d`, then a run of `d -> d-8`, then `d -> d-16` says there are two
+  independent 8-byte shrinks and tells you the offset each one starts at. A set
+  difference of the same two lists just yields two unaligned piles that look
+  like seven unrelated changes. `ResourcePackManager @ 1.26.44`: unchanged
+  through 144, -8 from 160, -16 from 360, which located both shrinks without
+  decompiling anything. Cross-check the count first - if the lists differ in
+  length, a member was added or removed and index pairing is invalid.
 - **Base-class removal is visible in the typeinfo kind.** Itanium
   `__vmi_class_type_info` (multiple bases, with the secondary vtable groups) ->
   `__si_class_type_info` (single base) is a removed base, and the removed base's
@@ -696,6 +874,51 @@ is only conditionally-supported and warns. Decide it once as a convention rather
 than per class. For any class that is *not* truncated, add the size assert - it
 turns this whole failure mode into a compile error.
 
+**A tail-only size delta still bites wherever `sizeof` is load-bearing - check all
+THREE ways before calling one benign.** Growth past the last member Endstone reads
+looks harmless, and per the `ServerLevel` note below the right move is then to stop
+rather than manufacture a placeholder - but only after ruling out each of:
+
+1. **Stride.** A class stored BY VALUE in a container has `sizeof` as its element
+   stride, so a shortfall silently misreads every element after the first.
+   `AttributeInstance @ 1.26.51` grew 8 bytes purely at the tail - destructor
+   displacements byte-identical to 1.26.45, both value arrays still at +104 and +116 -
+   and still had to be fixed, because `BaseAttributeMap` keeps its instances in a
+   `brstd::flat_map`'s `std::vector<AttributeInstance>`.
+2. **Variant storage.** A `std::variant`'s discriminant sits immediately after
+   `max(sizeof(alt))`, so growth in the *largest* alternative - or in anything an
+   alternative holds by value - moves the index Endstone reads and lands you in
+   `bad_variant_access`. The alternative need not be the class that changed: the event
+   structs hold `ItemInstance`/`ItemStack` by value, so those types' sizes feed the
+   variant even though nothing names them as alternatives.
+3. **Base subobject.** Anything deriving the class shifts by the same delta.
+
+Only a class that fails all three - held solely through a pointer, never a variant
+alternative nor a by-value member of one - is genuinely free. `Item` and its subclasses
+(`SharedPtr<Item>` throughout the registry) and `ActorDamageByBlockSource` (events hold
+damage sources by reference or smart pointer, never by value) are the worked examples.
+Grep for the owner before deciding; do not infer it from how the class "looks".
+
+**Sweeping check (2) is cheap and worth doing every bump.** Scan `.text` for the
+libc++ visit idiom - `mov e?x, dword ptr [reg + N]` immediately followed by
+`mov e?x, 0xffffffff` - and collect the set of N. Diff that set across the two
+binaries: an offset that appears or disappears is a variant whose storage changed.
+Cross-check the per-handler view too, by walking each `Script*GameplayHandler`
+vtable and reading the offset each slot loads, then matching it against the
+`__index` offset clang reports for the variant Endstone declares
+(`-fdump-record-layouts`, taking the LAST `__index_t __index` in the record - the
+earlier ones belong to variants nested inside alternatives). 1.26.51 moved exactly
+one, `MutableLevelGameplayEvent` from +24 to +40, and left every offset <= 400
+otherwise untouched - which also proves transitively that `ItemInstance` and
+`ItemStack` did not change size, since they feed those alternatives by value.
+
+**Sweep the RAW `static_assert(sizeof(X) == N)` form too.** Not every guard uses
+`BEDROCK_STATIC_ASSERT_SIZE`; a handful of headers carry a hand-written, and therefore
+platform-blind, `static_assert` instead. A sweep that greps only the macro reports the
+class as unguarded, and you then add a *second* assert next to the stale one and get a
+build failure quoting a number you never typed. Grep both spellings, and replace the
+raw one with the macro when you touch it.
+
 Two things that make the guard weaker than it looks:
 
 - **A size assert never checks BDS.** `static_assert(sizeof(X) == N)` compares
@@ -705,6 +928,23 @@ Two things that make the guard weaker than it looks:
   `ResourcePacksInfoPacket` asserted 128 against a 136-byte object,
   `ClientboundMapItemDataPacket` 200 against 208; both packets are read and
   mutated by hooks).
+- **Sweep the asserts mechanically, but trust the DIFFERENTIAL, not the absolute.**
+  Parse every `BEDROCK_STATIC_ASSERT_SIZE` for its class name, mangle it to
+  `_ZTS<len><Class>` (nested -> `N..E`), and run the Itanium-D0 `sizeof` oracle
+  against **both** the old and the new binary. Comparing new-vs-old is reliable
+  because the same picker runs on both; comparing the oracle's absolute answer
+  against the asserted literal is **not** - a heuristic that takes the first
+  early slot tail-calling sized `operator delete` mis-fires on abstract bases
+  and on classes whose dtor pair is not at slots 0/1, and reports nonsense like
+  `Packet` = 8 or `PlayerAuthInputPacket` = 72. Validate the method per class by
+  requiring it to reproduce the *old* asserted number first; where it does, a
+  changed new number is real. 1.26.44's only genuine hit was
+  `ResourcePackManager` 416 -> 400 (Linux), and the method reproduced 416
+  exactly on 1.26.40, which is what made 400 trustworthy.
+- **Non-polymorphic classes are invisible to this sweep** (no vtable, no D0) -
+  in practice ~half the asserted list, including most `*Payload` structs. Report
+  them as unresolved rather than as "unchanged"; they need the cereal-manager or
+  factory oracles instead.
 - **No `// ...` marker does not mean the class is complete.** `ServerInstance`
   carries no marker yet declares 936 of 1080 bytes. So "add asserts to every
   unmarked class" is not a mechanical sweep: derive the real size first, and
@@ -787,6 +1027,33 @@ the `SerializationMode` accessors.
    declaration order (`ResourcePackStackPacketPayload` @ 1.26.40 registers its
    `bool` first while the constructor stores the vector first). Take names from
    the registration, offsets from the constructor.
+5b. **`protocol-docs` ships one branch per release - diff it FIRST, before opening a
+   binary.** `r26_u4` is 1.26.45, `r26_u5` is 1.26.51, and
+   `git diff origin/r26_u<prev> origin/r26_u<new> -- packets types enums` names every
+   packet and type whose wire changed in seconds. Intersect that with the headers
+   Endstone declares and you have the actionable set without a single decompile. It
+   also separates real changes from serializer churn: a release that drops the
+   unnamed `{"type": "bool", "value": true}` constants everywhere (1.26.51 did) is a
+   cereal change with no struct impact, so a packet whose whole diff is those lines -
+   `PlayerAuthInputPacket`, `InventorySource`, `InventoryTransaction` - needs nothing.
+5c. **The documented wire type gives the C++ enum's WIDTH.** cereal writes a 1-byte
+   enum as `uint8` and a 4-byte one as `uvarint32`, so protocol-docs' `"type"` is a
+   direct read of the underlying type. Validate the rule on two enums you already
+   declare, then trust it: 1.26.51's new `ItemUseInventoryTransaction` member
+   documented `"type": "uint8", "enum": "HandSlot"` proved `HandSlot` had narrowed
+   from `int`, which no size check could see (both widths give the same layout). The
+   binary's `cereal::internal::TypeSchema<HandSlot>` string confirms the member's type
+   independently - grep for it rather than inferring from the field name.
+5d. **`make_shared`'s zero-init stops at the payload's DSIZE, which settles
+   declaration order when the size cannot.** The factory zeroes `[object, dsize)`
+   using aligned 16-byte stores plus one trailing *unaligned* store, so the end of
+   that last store is the offset just past the final member. When it lands on an odd
+   offset the last-declared member is one byte wide - that alone ruled out wire order
+   for `PlaySoundPacket @ 1.26.51`, whose two new fields are documented as a `bool`
+   before the sound handle and an optional after it, but whose zero-init ends at
+   payload+73. Both orders gave `sizeof` 80 on both platforms, so nothing else
+   discriminated them.
+
 6. **Cross-check the wire with protocol-docs.** The cereal field set == the
    serialized fields; `EndstoneMC/protocol-docs` (`<branch>/packets/<Name>.json`)
    lists them in order, mapping the copy's offsets to names and flagging
@@ -928,6 +1195,55 @@ the `SerializationMode` accessors.
    its declaration order (teardown offsets map 1:1 onto the 1.26.32 order) even
    though `settings` is the *sixth* field on the wire, because registration order
    is chosen independently of declaration order.
+22. **`cerealizer<T>::bind` is the exact wire field list, and it tells a variant
+   TAG from a real member by how each is bound.** Reach it by grepping the binary
+   for the type-name literal (`"RemoveScore"`) and taking the lone data xref. A
+   genuine data member goes through `cereal::BasicFactory<T>::_bindInternalCommon`
+   and carries a `meta_setter_<T>_&T::m<Field>_`; the discriminant is instead bound
+   straight through `basic_meta_factory::data` + `custom(MemberDescriptor)` with
+   `traits = is_static|is_const` and a *constant-returning* getter named
+   `meta_getter_<T>_<N>_`, `<N>` being that case's tag value. Each entry also
+   installs a `TypeSchema<...>` vftable that spells the member's type outright
+   (`TypeSchema<std::optional<std::string>>`).
+   - **A registered `is_static|is_const` member IS still written to the wire** -
+     as cereal's name-coded string. It is a constant, not a stored field, and it
+     is absent from the C++ struct, but the serializer emits it all the same. So
+     a cerealised variant entry carries the discriminant **TWICE**: first the
+     `uvarint32` case index, then that constant again as a length-prefixed name.
+     `SetScorePacket @ 1.26.44` on the wire is
+     `01 | 00 | 06 "remove" | e0 02 | 01 | 01 | 04 "demo"` =
+     count, index 0, name `"remove"`, scoreboard id, the new keyed bool, the
+     optional's presence bool, the objective name.
+   - **Do not read "the struct has no member" as "the wire has no field".**
+     bedrock-headers shows `RemoveScore` as just `mScoreboardId` +
+     `mObjectiveName`, and protocol-docs prints the constant twice (packet-level
+     `switch` plus a per-case `"Action"` of the enum's string type). Both are
+     accurate; neither means one tag. `bedrock-protocol`'s
+     `action: SomeEnum = field(type=str)` was the model that had it right, and
+     `field(type=str)` generating a name-coded serializer is the *point*, not an
+     artifact.
+   - **The name-coded string is not the C++ enumerator spelling.** The binary
+     carries `"ChangeFakePlayer"` as a literal, but the wire writes lowercase
+     `"remove"`. Casing is per enum ([[project_bds_cereal_enum_wire_names]]), so
+     never derive it - and when only transforming a payload, read the case from
+     the index and copy the name through verbatim rather than interpreting it.
+   - This one is only settleable by **capturing a live packet**. The cerealizer
+     binding, protocol-docs and bedrock-headers were each individually
+     consistent with a single one-byte tag, and all three readings were wrong.
+     A 4-case variant plus a short name string still looks plausible at a glance,
+     so budget for a capture before shipping a byte-level rewrite.
+   - **In a CEREALISED packet a variant tag is always a `uvarint32`**, whatever
+     the enum's underlying type says. This is a cereal rule, not a universal one:
+     a hand-written `write` picks its own width and often spells the same
+     discriminant as a plain `uint8`. So establish which kind of packet it is
+     before encoding anything - **presence in `protocol-docs` IS the test: if a
+     packet is not documented there, it is not cerealised**, and its tag width
+     comes from reading its manual `write`. Everything from protocol 2168 onward
+     is cerealised; earlier releases are a mix.
+   - The trap is that it is invisible: a 4-case variant's tag fits in one byte,
+     so reading a cerealised tag as `uint8` is byte-identical and stays correct
+     until a variant grows past 128 cases. Encode to the packet's actual kind
+     rather than to what the bytes happen to look like today.
 
 Worked example: **BossEventPacket @ 1.26.32** - migrated to cereal-only;
 `color`/`overlay` narrowed 4B->1B, both `darken`/`fog` bools removed, a
@@ -1018,6 +1334,24 @@ must be right. Exploit that:
 - Only the **size driver** (largest `K`) needs a byte-exact body; confirm with
   `BEDROCK_STATIC_ASSERT_SIZE`. After a size-drift fix the driver can become a
   *different* alternative - recompute which one it is.
+- **On Linux, read the alternative count straight off the visit table - and bound
+  it by the next rip-referenced address.** libc++'s `std::visit` compiles to
+  `mov eax, dword [event+OFF]; cmp rax, -1; je <valueless>; lea rcx,[rip+TABLE];
+  call [rcx+rax*8]`, so `OFF` is the discriminant offset (a 4-byte index; `-1` is
+  `variant_npos`) and `TABLE` holds one thunk per alternative. Do **NOT** end the
+  table at "the next qword is not a code pointer" - the generated thunks of
+  neighbouring tables sit directly after it and the run reads far too long (an
+  8-alternative table measured 51). The terminator is the **next address in the
+  image that any rip-relative `lea` references**; `(next - TABLE)/8` is the count.
+  Validate the method on the PREVIOUS binary first - it must reproduce the count
+  Endstone already declares.
+- **A vtable change on a `Script*GameplayHandler` does not by itself mean variant
+  drift.** BDS adds whole new `handleEvent` overloads (a new event category) far
+  more often than it changes an existing variant. Compare the discriminant offset
+  and the bounded alternative count of the **hooked slot** across versions before
+  touching an event list; an insertion *below* the hooked ordinal changes nothing.
+  `vhook::create<N>` patches `vtable[N]` by raw index, so only insertions at or
+  above `N` can break a hook.
 - **Confirm live**: breakpoint the hooked `handleEvent`, copy `byte
   [event+OFF_real]` into `byte [event+OFF_endstone]`, and continue - if the
   `bad_variant_access` then vanishes across a full start/stop, the offset/size
@@ -1102,6 +1436,22 @@ any pattern-only table however the version was resolved.
      qword instead (points into `.text` / into `.rdata` / zero / plain data) and
      compare the **total count of code pointers**. Equal counts across versions
      = no vtable slot added or removed binary-wide.
+   - **When the counts DON'T match, the global number proves nothing - diff
+     per class by RTTI before believing it.** Key every vtable by its Itanium
+     typeinfo name (`_ZTS...` -> typeinfo -> address points with a
+     non-relocated `offset_to_top == 0`), record each class's slot-run lengths,
+     and compare the two name-keyed maps. That turns "18 code pointers
+     disappeared, something moved" into a named set difference. 1.26.44 read
+     -18 on Linux / -7 on Windows and the per-class diff over ~45k classes
+     showed **zero** classes changed shape: the delta was three whole classes
+     going away (a cereal constraint helper plus its and one other
+     `__shared_ptr_emplace<T>` control-block vtable). Template instantiations
+     appearing and vanishing is routine churn and moves the global count
+     without any class changing - only the per-class diff separates the two.
+   - A vanished `__shared_ptr_emplace<T>` is also a **free lead**: it means
+     nothing calls `make_shared<T>` any more, which usually pairs with a member
+     somewhere changing `shared_ptr<T>` -> `unique_ptr<T>`. Go looking for it
+     rather than waiting for the crash.
 4. **Protocol version, statically.** `SharedConstants::NetworkProtocolVersion`
    is compared directly inside
    `ServerNetworkHandler::_validateLoginPacket`, whose offset the table already
@@ -1365,6 +1715,31 @@ only a tiny `.dynsym`), so every Linux entry is pattern-resolved too.
   only some files of a stage (e.g. some `network/packet/*` but not all) and left
   `.cpp` files referencing the pre-refactor shape. Build early; the first compile
   pass surfaces these gaps.
+
+### Adding a pure virtual makes every embedder abstract
+
+- A pure virtual added to a base class propagates: `field type '...' is an
+  abstract class` at every by-value member, far from the edit. A pure virtual
+  *destructor* never does this - the implicitly-declared derived destructor
+  overrides it. Any other pure virtual needs an explicit override somewhere down
+  the chain.
+- Declare the override where the headers put it, not where it is convenient. The
+  DWARF dump for a class defined inside a `.cpp` lands in
+  `bedrock-headers/src/.../<Name>.cpp`, not the matching `.h` - grep both.
+- A declared-but-undefined virtual is a link error only if the vtable is emitted,
+  which for these class templates needs a constructor or destructor to be
+  odr-used. Two ways to check before paying for a build:
+  - `llvm-nm` the object files a previous build already left in the build tree
+    and grep for the mangled type name. No symbol in any `.obj` means nothing
+    forces emission.
+  - Write a probe `.cpp` that constructs the type, compile it with `-c`, and
+    `llvm-nm -u` it. This proves the check is sensitive, and it lists the other
+    declaration-only symbols the same vtable already needs. If those already
+    exist in a tree that links, the new declaration adds no risk.
+- To compile a single TU without touching the build tree, lift the flags from a
+  `FAILED:` line in the build log (**not** the repo-root `compile_commands.json`,
+  which can be stale) and use clang-cl `/Zs`; add `-ferror-limit=0` so unrelated
+  breakage does not hide your error.
 
 ## Record findings here
 

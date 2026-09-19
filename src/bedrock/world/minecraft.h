@@ -44,14 +44,17 @@ public:
     [[nodiscard]] Level *getLevel() const;
 
 private:
+    struct Impl;
+
     GameCallbacks &game_callbacks_;
     IMinecraftEventing &eventing_;
     std::unique_ptr<ResourcePackManager> resource_loader_;
     std::unique_ptr<StructureManager> structure_manager_;
-    std::shared_ptr<GameModuleServer> game_module_server_;
-    // AllowList &allow_list_;
+    // TODO(fixme): check the name - a pointer member 1.26.51 added here
+    void *unknown_56_;
     PermissionsFile *permissions_file_;
     std::unique_ptr<PrivateKeyManager> server_keys_;
+    std::shared_ptr<GameModuleServer> game_module_server_;
     std::shared_ptr<MinecraftServiceKeyManager> minecraft_service_keys_;
     std::string save_game_path_;
     // Bedrock::NonOwnerPointer<Core::FilePathManager> file_path_manager_;
@@ -72,8 +75,7 @@ private:
     ClientOrServerNetworkSystemRef network_;
     PacketSender *packet_sender_;
     SubClientId client_sub_id_;
-    // TODO(fixme): check the name
-    void *unknown_264_;  // win +264, linux +256; a unique_ptr to a 1-byte trivially-destructible object
+    std::unique_ptr<Impl> impl_;
     OwnerPtr<EntityRegistry> entity_registry_;
     std::unique_ptr<ITickingSystem> add_movement_tick_for_catchup_;
     Bedrock::PubSub::PublisherPtr<void(Level *), Bedrock::PubSub::ThreadModel::SingleThreaded> level_subscribers_;

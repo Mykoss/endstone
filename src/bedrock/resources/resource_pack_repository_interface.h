@@ -15,6 +15,7 @@
 #pragma once
 
 #include "bedrock/core/threading/async.h"
+#include "bedrock/resources/content_source_repository.h"
 #include "bedrock/resources/invalid_packs_filter_group.h"
 #include "bedrock/resources/pack_source.h"
 #include "bedrock/resources/pack_source_factory.h"
@@ -66,17 +67,22 @@ public:
     virtual PackManifestFactory &getPackManifestFactory() = 0;
     [[nodiscard]] virtual PackSettingsFactory &getPackSettingsFactory() const = 0;
     virtual PackSourceFactory &getPackSourceFactory() = 0;
-    // [[nodiscard]] virtual CompositePackSource const *getWorldPackSource() const = 0;
     [[nodiscard]] virtual std::vector<ResourcePack *> getPacksByResourceLocation(PackOrigin) const = 0;
     [[nodiscard]] virtual std::vector<ResourcePack *> getPacksByType(PackType) const = 0;
     [[nodiscard]] virtual std::vector<gsl::not_null<std::shared_ptr<ResourcePack>>> getPacksByCategory(
-        PackCategory) = 0;
+        PackCategory) const = 0;
     virtual void forEachPack(const std::function<void(const ResourcePack &)> &) const = 0;
     [[nodiscard]] virtual std::vector<ResourceLocation> const &getInvalidPacks(PackType) const = 0;
+    // TODO(fixme): check the name
+    virtual void unknown47() = 0;
     [[nodiscard]] virtual std::vector<ResourceLocation> getInvalidPacks(InvalidPacksFilterGroup const &) const = 0;
+    // TODO(fixme): check the names
+    virtual void unknown49() = 0;
+    virtual void unknown50() = 0;
     virtual void deletePack(ResourceLocation const &) = 0;
     virtual void deletePackFiles(ResourceLocation const &) = 0;
     virtual void postDeletePack(ResourceLocation const &) = 0;
     virtual void untrackInvalidPack(ResourceLocation const &) = 0;
     [[nodiscard]] virtual bool isInitialized() const = 0;
+    virtual Bedrock::NotNullNonOwnerPtr<IContentSourceRepository> getContentSourceRepository() = 0;
 };

@@ -24,9 +24,11 @@
 #include <ranges>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <magic_enum/magic_enum.hpp>
+#include <toml++/toml.h>
 
 #include "endstone/core/server.h"
 #include "endstone/core/util/socket_address.h"
@@ -37,13 +39,43 @@ constexpr unsigned int MAX_OFFLINE_DATA_LENGTH = 400;
 constexpr unsigned char OFFLINE_MESSAGE_DATA_ID[16] = {0x00, 0xFF, 0xFF, 0x00, 0xFE, 0xFE, 0xFE, 0xFE,
                                                        0xFD, 0xFD, 0xFD, 0xFD, 0x12, 0x34, 0x56, 0x78};
 
-static endstone::ServerListPingEvent callServerListPingEvent(endstone::SocketAddress address, std::string_view data)
+static std::vector<std::string> splitAdvertisement(std::string_view data)
 {
     std::vector<std::string> parts;
     for (auto part : data | std::views::split(';')) {
         parts.emplace_back(part.begin(), part.end());
     }
+    return parts;
+}
 
+// BDS appends fields to the advertisement over time, so keep every field it sent and rewrite only the ones
+// the event models. Anything we don't know about passes through untouched.
+static std::string buildAdvertisement(std::vector<std::string> parts, const endstone::ServerListPingEvent &event)
+{
+    parts.resize(std::max<std::size_t>(parts.size(), 14));
+    parts[0] = "MCPE";
+    parts[1] = event.getMotd();
+    parts[2] = std::to_string(event.getNetworkProtocolVersion());
+    parts[3] = event.getMinecraftVersionNetwork();
+    parts[4] = std::to_string(event.getNumPlayers());
+    parts[5] = std::to_string(event.getMaxPlayers());
+    parts[6] = event.getServerGuid();
+    parts[7] = event.getLevelName();
+    parts[8] = magic_enum::enum_name(event.getGameMode());
+    parts[10] = std::to_string(event.getLocalPort());
+    parts[11] = std::to_string(event.getLocalPortV6());
+
+    std::string response = parts[0];
+    for (std::size_t i = 1; i < parts.size(); ++i) {
+        response += ';';
+        response += parts[i];
+    }
+    return response;
+}
+
+static endstone::ServerListPingEvent callServerListPingEvent(endstone::SocketAddress address,
+                                                             const std::vector<std::string> &parts)
+{
     const auto n = parts.size();
     auto motd = n > 1 ? parts[1] : "";
     auto network_protocol_version = n > 2 ? std::stoi(parts[2]) : 0;
@@ -82,7 +114,8 @@ static bool handleUnconnectedPing(RakNet::RNS2RecvStruct *recv)
 
     // call ServerListPingEvent with the default offline ping response
     auto address = endstone::core::EndstoneSocketAddress::fromSystemAddress(recv->systemAddress);
-    auto event = callServerListPingEvent(address, std::string_view(ping_data + 2, ping_size - 2));
+    auto parts = splitAdvertisement(std::string_view(ping_data + 2, ping_size - 2));
+    auto event = callServerListPingEvent(address, parts);
     if (event.isCancelled()) {
         return false;
     }
@@ -97,11 +130,7 @@ static bool handleUnconnectedPing(RakNet::RNS2RecvStruct *recv)
     is.Read(remoteGuid);
 
     // prepare ping response
-    auto response =
-        std::format("MCPE;{};{};{};{};{};{};{};{};1;{};{};0;", event.getMotd(), event.getNetworkProtocolVersion(),
-                    event.getMinecraftVersionNetwork(), event.getNumPlayers(), event.getMaxPlayers(),
-                    event.getServerGuid(), event.getLevelName(), magic_enum::enum_name(event.getGameMode()),
-                    event.getLocalPort(), event.getLocalPortV6());
+    auto response = buildAdvertisement(std::move(parts), event);
     RakNet::BitStream os;
     os.Write(static_cast<RakNet::MessageID>(ID_UNCONNECTED_PONG));
     os.Write(sendPingTime);
@@ -127,6 +156,21 @@ bool handleIncomingDatagram(RakNet::RNS2RecvStruct *recv)
     return true;
 }
 
+struct IPSupport : RakPeerHelper::IPSupportInterface {
+    [[nodiscard]] bool useIPv4Only() const override
+    {
+        try {
+            return !toml::parse_file("endstone.toml").at_path("network.ipv6").value_or(false);
+        }
+        catch (const toml::parse_error &) {
+            return true;
+        }
+    }
+    [[nodiscard]] bool useIPv6Only() const override { return false; }
+    [[nodiscard]] std::uint16_t getDefaultGamePort() const override { return 0; }
+    [[nodiscard]] std::uint16_t getDefaultGamePortv6() const override { return 0; }
+};
+
 RakNet::StartupResult RakPeerHelper::peerStartup(RakNet::RakPeerInterface *peer, const ConnectionDefinition &def,
                                                  PeerPurpose purpose)
 {
@@ -137,7 +181,12 @@ RakNet::StartupResult RakPeerHelper::peerStartup(RakNet::RakPeerInterface *peer,
         peer->SetIncomingDatagramEventHandler(handleIncomingDatagram);
         gRakPeer = static_cast<RakNet::RakPeer *>(peer);
     }
-    return ENDSTONE_HOOK_CALL_ORIGINAL(&RakPeerHelper::peerStartup, this, peer, new_def, purpose);
+
+    IPSupport ip_support;
+    auto *restore = std::exchange(ip_support_, &ip_support);
+    const auto result = ENDSTONE_HOOK_CALL_ORIGINAL(&RakPeerHelper::peerStartup, this, peer, new_def, purpose);
+    ip_support_ = restore;
+    return result;
 }
 
 namespace RakNet {

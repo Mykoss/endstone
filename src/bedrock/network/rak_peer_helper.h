@@ -42,10 +42,17 @@ public:
 
     enum class PeerPurpose : int {
         Gameplay = 0,
-        LanDiscovery = 1,
-        Count = 2
+        LAN_Discovery = 1,
+        Count = 2,
     };
 
     ENDSTONE_HOOK RakNet::StartupResult peerStartup(RakNet::RakPeerInterface *, ConnectionDefinition const &,
                                                     PeerPurpose);
+
+private:
+    RakNet::StartupResult startup_result_;  // +0
+    int ipv4_index_;                        // +4
+    int ipv6_index_;                        // +8
+    std::uint16_t bound_ports_[2];          // +12
+    IPSupportInterface *ip_support_;        // +16
 };

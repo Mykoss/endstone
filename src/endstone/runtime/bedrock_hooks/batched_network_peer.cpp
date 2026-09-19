@@ -14,6 +14,9 @@
 
 #include "bedrock/network/batched_network_peer.h"
 
+#include <cstdint>
+#include <string>
+
 #include "bedrock/network/packet.h"
 #include "bedrock/network/packet/clientbound_map_item_data_packet.h"
 #include "bedrock/network/packet/resource_pack_stack_packet.h"
@@ -37,7 +40,7 @@ void patchPacket(const StartGamePacket &packet)
     const auto &server = endstone::core::EndstoneServer::getInstance();
     if (const auto *level = server.getEndstoneLevel(); level && !level->getHandle().isClientSideGenerationEnabled()) {
         auto &pk = const_cast<StartGamePacket &>(packet);
-        pk.settings.setRandomSeed(0);
+        pk.payload.settings.setRandomSeed(0);
     }
 }
 
@@ -45,8 +48,8 @@ void patchPacket(const ResourcePacksInfoPacket &packet)
 {
     const auto &server = endstone::core::EndstoneServer::getInstance();
     auto &pk = const_cast<ResourcePacksInfoPacket &>(packet);
-    for (auto &pack_info : pk.data.resource_packs) {
-        if (const auto *key = server.getContentKey(pack_info.m_pack_id_version)) {
+    for (auto &pack_info : pk.payload.resource_packs) {
+        if (const auto *key = server.getContentKey(pack_info.pack_id_version)) {
             pack_info.content_key = *key;
         }
     }
@@ -54,12 +57,12 @@ void patchPacket(const ResourcePacksInfoPacket &packet)
 
 void patchPacket(const ResourcePackStackPacket &packet)
 {
-    if (packet.texture_pack_required) {
+    if (packet.payload.texture_pack_required) {
         const auto &server = endstone::core::EndstoneServer::getInstance();
         if (server.getAllowClientPacks()) {
             auto &pk = const_cast<ResourcePackStackPacket &>(packet);
             // false, otherwise the client will remove its own non-server-supplied resource packs.
-            pk.texture_pack_required = false;
+            pk.payload.texture_pack_required = false;
         }
     }
 }
@@ -158,8 +161,9 @@ void BatchedNetworkPeer::sendPacket(const std::string &data, Reliability reliabi
 
     // Create packet send event
     auto payload = stream.getView().substr(stream.getReadPointer());
-    endstone::PacketSendEvent e{player, static_cast<int>(header.getPacketId()), payload,
-                                endstone::core::EndstoneSocketAddress::fromNetworkIdentifier(id),
+    const auto address =
+        player ? player->getAddress() : endstone::core::EndstoneSocketAddress::fromNetworkIdentifier(id);
+    endstone::PacketSendEvent e{player, static_cast<int>(header.getPacketId()), payload, address,
                                 static_cast<int>(header.getSenderSubId())};
 
     // Patch specific outbound packets (deserialize -> modify -> re-serialize)
@@ -202,7 +206,9 @@ void BatchedNetworkPeer::sendPacket(const std::string &data, Reliability reliabi
     if (e.getPayload().data() != payload.data()) {
         BinaryStream out;
         header.write(out);
-        out.writeRawBytes(e.getPayload());
+        const auto new_payload = e.getPayload();
+        const auto *bytes = reinterpret_cast<const unsigned char *>(new_payload.data());
+        out.writeRawBytes({bytes, bytes + new_payload.size()}, nullptr, nullptr);
         ENDSTONE_HOOK_CALL_ORIGINAL(&BatchedNetworkPeer::sendPacket, this, out.getBuffer(), reliability, compressible);
     }
     else {
@@ -229,6 +235,7 @@ NetworkPeer::DataStatus BatchedNetworkPeer::_receivePacket(std::string &out_data
         }
 
         const auto header = PacketHeader::fromRaw(result.value());
+
         const auto &id = getId();
         endstone::core::EndstonePlayer *player = nullptr;
         if (const auto *p = network_handler->getServerPlayer(id, header.getRecipientSubId())) {
@@ -236,8 +243,9 @@ NetworkPeer::DataStatus BatchedNetworkPeer::_receivePacket(std::string &out_data
         }
 
         const auto payload = stream.getView().substr(stream.getReadPointer());
-        endstone::PacketReceiveEvent e{player, static_cast<int>(header.getPacketId()), payload,
-                                       endstone::core::EndstoneSocketAddress::fromNetworkIdentifier(id),
+        const auto address =
+            player ? player->getAddress() : endstone::core::EndstoneSocketAddress::fromNetworkIdentifier(id);
+        endstone::PacketReceiveEvent e{player, static_cast<int>(header.getPacketId()), payload, address,
                                        static_cast<int>(header.getRecipientSubId())};
         server.getPluginManager().callEvent(e);
         if (e.isCancelled()) {
@@ -257,9 +265,20 @@ NetworkPeer::DataStatus BatchedNetworkPeer::_receivePacket(std::string &out_data
 
 const NetworkIdentifier &BatchedNetworkPeer::getId() const
 {
-    auto peer = peer_;
-    while (peer->peer_) {
-        peer = peer->peer_;
+    // The innermost peer is transport-specific, so find the connection we belong to instead.
+    static const NetworkIdentifier invalid = [] {
+        NetworkIdentifier id{};
+        id.type = NetworkIdentifier::Type::Invalid;
+        return id;
+    }();
+
+    const auto &server = endstone::core::EndstoneServer::getInstance();
+    for (const auto &connection : server.getServer().getNetwork().getConnections()) {
+        for (const auto *peer = connection->peer.get(); peer != nullptr; peer = peer->peer_.get()) {
+            if (peer == this) {
+                return connection->id;
+            }
+        }
     }
-    return static_cast<RakNetConnector::RakNetNetworkPeer &>(*peer).getId();
+    return invalid;
 }
