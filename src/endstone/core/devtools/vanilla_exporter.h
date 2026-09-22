@@ -28,6 +28,6 @@ namespace endstone::core::devtools {
  * function creates the destination directory when necessary and throws
  * std::runtime_error when a file cannot be written.
  */
-std::vector<std::filesystem::path> exportAll(const std::filesystem::path &base_path, const VanillaData &data);
+std::vector<std::filesystem::path> exportAll(const std::filesystem::path &base_path, const VanillaData &data);\n\n/** Exports the BDS 1.26.50+ jigsaw structure rules loaded by the current server. */\nstd::filesystem::path exportJigsawStructureData(const std::filesystem::path &base_path, const std::string &version, const ::Level &level);
 
 }  // namespace endstone::core::devtools
