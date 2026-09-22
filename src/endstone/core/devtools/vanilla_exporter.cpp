@@ -21,7 +21,7 @@
 
 #include <zstr.hpp>
 
-#include "bedrock/nbt/nbt_io.h"
+#include "bedrock/nbt/nbt_io.h"\n#include "bedrock/world/level/level_interface.h"\n#include "endstone/core/base64.h"\n#include "bedrock/world/level/levelgen/structure/jigsaw_structure_registry_data.h"
 #include "bedrock/util/string_byte_output.h"
 
 namespace endstone::core::devtools {
