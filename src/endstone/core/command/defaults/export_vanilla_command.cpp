@@ -20,7 +20,7 @@
 
 #include "endstone/core/devtools/vanilla_data.h"
 #include "endstone/core/devtools/vanilla_exporter.h"
-#include "endstone/core/scheduler/scheduler.h"
+#include "endstone/core/scheduler/scheduler.h"\n#include "endstone/core/level/level.h"
 #include "endstone/core/server.h"
 
 namespace endstone::core {
@@ -31,7 +31,7 @@ std::atomic_bool gExportInProgress = false;
 ExportVanillaCommand::ExportVanillaCommand() : EndstoneCommand("exportvanilla")
 {
     setDescription("Exports vanilla BDS data without the graphical DevTools.");
-    setUsages("/exportvanilla");
+    setUsages("/exportvanilla [jigsawVersion]");
     setAliases("exportdata");
     setPermissions("endstone.command.exportvanilla");
 }
@@ -57,7 +57,7 @@ bool ExportVanillaCommand::execute(CommandSender &sender, const std::vector<std:
 
     auto &server = EndstoneServer::getInstance();
     auto &scheduler = static_cast<EndstoneScheduler &>(server.getScheduler());
-    scheduler.runTask([output_path]() {
+    scheduler.runTask([output_path, jigsaw_version]() {
         auto &logger = EndstoneServer::getInstance().getLogger();
         try {
             logger.info("Collecting vanilla data from BDS...");
@@ -68,6 +68,16 @@ bool ExportVanillaCommand::execute(CommandSender &sender, const std::vector<std:
 
             logger.info("Writing vanilla data to {}...", output_path.string());
             auto files = devtools::exportAll(output_path, *data);
+            if (!jigsaw_version.empty()) {
+                auto *server_level = EndstoneServer::getInstance().getLevel();
+                if (server_level == nullptr) {
+                    throw std::runtime_error("The BDS level is no longer available.");
+                }
+                auto &level = static_cast<EndstoneLevel *>(server_level)->getHandle();
+                const auto jigsaw_file =
+                    devtools::exportJigsawStructureData(output_path, jigsaw_version, level);
+                files.emplace_back(jigsaw_file);
+            }
             for (const auto &file : files) {
                 logger.info("Exported {}", file.filename().string());
             }
