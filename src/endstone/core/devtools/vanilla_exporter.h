@@ -17,7 +17,7 @@
 #include <filesystem>
 #include <vector>
 
-#include "endstone/core/devtools/vanilla_data.h"
+#include "endstone/core/devtools/vanilla_data.h"\n\nclass Level;
 
 namespace endstone::core::devtools {
 
